@@ -18,7 +18,9 @@ import java.util.regex.Pattern;
 
 public class BurstTest {
 
-    private static final String BASE_URL = "http://localhost:8080";
+  //  private static final String BASE_URL = "http://localhost:8080";
+    private static final String BASE_URL =
+            System.getProperty("baseUrl", "http://localhost:8080");
 
     // Total requests in the burst
     private static final int REQUEST_COUNT = 20_000;
