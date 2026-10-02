@@ -3,6 +3,7 @@ package com.example.seat_reservation.service;
 import com.example.seat_reservation.dto.CreateShowRequest;
 import com.example.seat_reservation.dto.CreateShowResponse;
 import com.example.seat_reservation.dto.SeatResponse;
+import com.example.seat_reservation.dto.ShowResponse;
 import com.example.seat_reservation.entity.Seat;
 import com.example.seat_reservation.entity.SeatStatus;
 import com.example.seat_reservation.entity.Show;
@@ -17,6 +18,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 @Service
 public class ShowService {
@@ -65,7 +67,6 @@ public class ShowService {
             );
 
             seat.setStatus(SeatStatus.AVAILABLE);
-
             seats.add(seat);
         }
 
@@ -91,6 +92,85 @@ public class ShowService {
                 savedShow.getPerUserLimit(),
                 seatResponses
         );
+    }
+
+    @Transactional(readOnly = true)
+    public ShowResponse getShow(UUID showId) {
+
+        Show show = showRepository.findById(showId)
+                .orElseThrow(() ->
+                        new IllegalArgumentException(
+                                "Show not found"
+                        )
+                );
+
+        List<Seat> seats =
+                seatRepository.findByShowIdOrderBySeatNumber(showId);
+
+        int availableSeats = 0;
+        int heldSeats = 0;
+        int confirmedSeats = 0;
+
+        List<SeatResponse> seatResponses = new ArrayList<>();
+
+        for (Seat seat : seats) {
+
+            String status =
+                    seat.getStatus().name().toLowerCase();
+
+            seatResponses.add(
+                    new SeatResponse(
+                            seat.getSeatNumber(),
+                            status
+                    )
+            );
+
+            if (seat.getStatus() == SeatStatus.AVAILABLE) {
+                availableSeats++;
+            } else if (seat.getStatus() == SeatStatus.HELD) {
+                heldSeats++;
+            } else if (seat.getStatus() == SeatStatus.CONFIRMED) {
+                confirmedSeats++;
+            }
+        }
+
+        int totalSeats = seats.size();
+
+        /*
+         * Reconciliation invariant:
+         *
+         * available + held + confirmed = total
+         */
+        if (availableSeats + heldSeats + confirmedSeats
+                != totalSeats) {
+
+            log.error(
+                    "Show reconciliation invariant failed showId={} " +
+                            "available={} held={} confirmed={} total={}",
+                    showId,
+                    availableSeats,
+                    heldSeats,
+                    confirmedSeats,
+                    totalSeats
+            );
+
+            throw new IllegalStateException(
+                    "Show seat reconciliation invariant failed"
+            );
+        }
+
+        ShowResponse response = new ShowResponse();
+
+        response.setShowId(show.getId());
+        response.setName(show.getName());
+        response.setPricePaise(show.getPricePaise());
+        response.setSeats(seatResponses);
+        response.setTotalSeats(totalSeats);
+        response.setAvailableSeats(availableSeats);
+        response.setHeldSeats(heldSeats);
+        response.setConfirmedSeats(confirmedSeats);
+
+        return response;
     }
 
     private void validateDuplicateSeats(List<String> seatNumbers) {
