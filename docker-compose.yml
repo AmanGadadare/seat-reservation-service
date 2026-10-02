@@ -1,0 +1,34 @@
+services:
+
+  db:
+    image: postgres:18
+    container_name: seat-reservation-db
+    environment:
+      POSTGRES_DB: seat_reservation
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d seat_reservation"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    image: seat-reservation:latest
+    container_name: seat-reservation-app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/seat_reservation
+      SPRING_DATASOURCE_USERNAME: postgres
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres_data:
