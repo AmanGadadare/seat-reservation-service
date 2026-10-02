@@ -38,6 +38,20 @@ The service is designed to handle concurrent reservation requests while maintain
 
 ---
 
+## Tech Stack
+
+| Technology | Why it is used |
+|---|---|
+| Java 25 | Strong typing, backend concurrency support and Virtual Threads |
+| Spring Boot | REST APIs, dependency injection and transaction management |
+| Spring Data JPA / Hibernate | Database persistence and pessimistic locking |
+| PostgreSQL | Transactional source of truth and row-level locking |
+| Flyway | Version-controlled database migrations |
+| Docker | Reproducible application environment |
+| Docker Compose | Runs application and PostgreSQL locally |
+| Micrometer / Prometheus | Application metrics and observability |
+| Maven | Build and dependency management |
+
 ## 2. Repository
 
 GitHub repository:
@@ -272,65 +286,4 @@ Available + Held + Confirmed = Total
 For the hot-seat test:
 ```text
 0 + 0 + 1 = 1
-```
-9. If the Test Fails
-   Check application logs:
-```bash
-docker compose logs -f app
-```
-Check database logs:
-```bash
-docker compose logs -f db
-```
-Check container status:
-```bash
-docker compose ps
-```
-Check readiness again:
-```bash
-curl.exe http://localhost:8080/health/ready
-```
-10. Restart the Test Environment
-    Stop the containers:
-```bash
-docker compose down
-```
-Start again:
-```bash
-docker compose up --build
-```
-Then check:
-```bash
-curl.exe http://localhost:8080/health/ready
-```
-And run:
-```bash
-java scripts/BurstTest.java
-```
-Quick Run
-If the repository is already cloned and `.env` is configured:
-Terminal 1
-```bash
-docker compose up --build
-```
-Terminal 2
-```bash
-curl.exe http://localhost:8080/health/ready
-```
-Then:
-```bash
-mvnw.cmd test
-```
-Then:
-```bash
-java scripts/BurstTest.java
-```
-Test File
-The burst test source code is located at:
-```text
-scripts/BurstTest.java
-```
-Run it from the project root using:
-```bash
-java scripts/BurstTest.java
 ```
