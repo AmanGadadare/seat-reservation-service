@@ -17,4 +17,7 @@ public interface SeatRepository extends JpaRepository<Seat, UUID> {
             UUID showId,
             List<String> seatNumbers
     );
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    List<Seat> findByIdInOrderBySeatNumber(List<UUID> seatIds);
 }

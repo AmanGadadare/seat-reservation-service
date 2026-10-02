@@ -1,23 +1,20 @@
 package com.example.seat_reservation.service;
 
-import com.example.seat_reservation.dto.ReservationResponse;
-import com.example.seat_reservation.dto.ReserveRequest;
 import com.example.seat_reservation.entity.Reservation;
 import com.example.seat_reservation.entity.ReservationSeat;
-import com.example.seat_reservation.entity.ReservationSeatId;
 import com.example.seat_reservation.entity.ReservationStatus;
 import com.example.seat_reservation.entity.Seat;
 import com.example.seat_reservation.entity.SeatStatus;
 import com.example.seat_reservation.entity.Show;
 import com.example.seat_reservation.entity.ShowUserLimit;
-import com.example.seat_reservation.exception.BookingConflictException;
 import com.example.seat_reservation.repository.ReservationRepository;
 import com.example.seat_reservation.repository.ReservationSeatRepository;
 import com.example.seat_reservation.repository.SeatRepository;
 import com.example.seat_reservation.repository.ShowRepository;
 import com.example.seat_reservation.repository.ShowUserLimitRepository;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.example.seat_reservation.dto.ReservationResponse;
+import com.example.seat_reservation.dto.ReserveRequest;
+import com.example.seat_reservation.exception.BookingConflictException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,17 +22,12 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashSet;
+import java.util.Collections;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 
 @Service
 public class ReservationService {
-
-    private static final Logger log =
-            LoggerFactory.getLogger(ReservationService.class);
 
     private final ShowRepository showRepository;
     private final SeatRepository seatRepository;
@@ -63,145 +55,97 @@ public class ReservationService {
             String userId,
             ReserveRequest request
     ) {
+        List<String> requestedSeats = normalizeSeatNumbers(request.getSeats());
 
-        if (userId == null || userId.isBlank()) {
-            throw new BookingConflictException(
-                    "UNAUTHORIZED",
-                    "Authenticated user is required"
-            );
-        }
+        String requestHash = calculateRequestHash(requestedSeats);
 
-        List<String> requestedSeats =
-                normalizeAndValidateSeats(request.getSeats());
-
-        String idempotencyKey =
-                request.getIdempotencyKey().trim();
-
-        String requestHash =
-                calculateRequestHash(requestedSeats);
-
-        log.info(
-                "Reservation request received: showId={}, userId={}, seats={}, idempotencyKey={}",
-                showId,
-                userId,
-                requestedSeats,
-                idempotencyKey
-        );
-
-        /*
-         * Fast idempotency check.
-         *
-         * This handles the common case where the reservation
-         * already exists before we need to acquire locks.
-         */
+        // Fast idempotency check.
         var existingReservation =
-                reservationRepository
-                        .findByShowIdAndUserIdAndIdempotencyKey(
-                                showId,
-                                userId,
-                                idempotencyKey
-                        );
+                reservationRepository.findByShowIdAndUserIdAndIdempotencyKey(
+                        showId,
+                        userId,
+                        request.getIdempotencyKey()
+                );
 
         if (existingReservation.isPresent()) {
-
             Reservation existing = existingReservation.get();
 
-            validateIdempotencyRequest(
-                    existing,
-                    requestHash
-            );
+            if (!existing.getRequestHash().equals(requestHash)) {
+                throw new BookingConflictException(
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "Idempotency key was already used with a different request"
+                );
+            }
 
-            return buildResponse(
-                    existing,
-                    requestedSeats
-            );
+            return buildResponse(existing);
         }
 
         Show show = showRepository.findById(showId)
                 .orElseThrow(() ->
                         new BookingConflictException(
                                 "SHOW_NOT_FOUND",
-                                "Show not found: " + showId
+                                "Show not found"
                         )
                 );
 
         /*
-         * Make sure the user-limit row exists.
+         * Create the per-user limit row if it does not already exist.
          *
-         * ON CONFLICT DO NOTHING makes this safe when
-         * multiple requests arrive for the same user/show
-         * for the first time.
+         * This operation is safe under concurrent requests because
+         * the database primary key prevents duplicate rows.
          */
-        showUserLimitRepository.insertIfAbsent(
-                showId,
-                userId
-        );
+        showUserLimitRepository.insertIfAbsent(showId, userId);
 
         /*
          * Lock the user/show limit row.
          *
-         * This serializes reservations made by the same
-         * user for the same show.
+         * This serializes concurrent reservations made by the
+         * same user for the same show.
          */
         ShowUserLimit userLimit =
-                showUserLimitRepository
-                        .findByShowIdAndUserId(
-                                showId,
-                                userId
-                        )
+                showUserLimitRepository.findByShowIdAndUserId(showId, userId)
                         .orElseThrow(() ->
                                 new IllegalStateException(
-                                        "Unable to create user reservation limit"
+                                        "Unable to create user reservation limit row"
                                 )
                         );
 
         /*
-         * IMPORTANT:
+         * Check idempotency again after acquiring the user lock.
          *
-         * Another identical request could have completed
-         * while this request was waiting for the user-limit
-         * lock.
-         *
-         * Therefore we MUST check idempotency again after
-         * acquiring the lock.
+         * This handles two identical requests arriving concurrently.
          */
-        var existingAfterLock =
-                reservationRepository
-                        .findByShowIdAndUserIdAndIdempotencyKey(
-                                showId,
-                                userId,
-                                idempotencyKey
-                        );
+        existingReservation =
+                reservationRepository.findByShowIdAndUserIdAndIdempotencyKey(
+                        showId,
+                        userId,
+                        request.getIdempotencyKey()
+                );
 
-        if (existingAfterLock.isPresent()) {
+        if (existingReservation.isPresent()) {
+            Reservation existing = existingReservation.get();
 
-            Reservation existing =
-                    existingAfterLock.get();
+            if (!existing.getRequestHash().equals(requestHash)) {
+                throw new BookingConflictException(
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "Idempotency key was already used with a different request"
+                );
+            }
 
-            validateIdempotencyRequest(
-                    existing,
-                    requestHash
-            );
-
-            return buildResponse(
-                    existing,
-                    requestedSeats
-            );
+            return buildResponse(existing);
         }
 
         /*
-         * Lock all requested seats.
+         * Always lock seats in deterministic seat-number order.
          *
-         * The repository query sorts them by seat number,
-         * which gives every request the same lock order and
-         * reduces deadlock risk for multi-seat reservations.
+         * This reduces deadlock risk when multiple requests
+         * attempt to reserve multiple seats concurrently.
          */
         List<Seat> seats =
-                seatRepository
-                        .findByShowIdAndSeatNumberInOrderBySeatNumber(
-                                showId,
-                                requestedSeats
-                        );
+                seatRepository.findByShowIdAndSeatNumberInOrderBySeatNumber(
+                        showId,
+                        requestedSeats
+                );
 
         if (seats.size() != requestedSeats.size()) {
             throw new BookingConflictException(
@@ -211,221 +155,324 @@ public class ReservationService {
         }
 
         /*
-         * Because the seats are locked, this check is
-         * concurrency-safe.
+         * All-or-nothing behaviour:
+         * every requested seat must currently be AVAILABLE.
          */
         for (Seat seat : seats) {
-
             if (seat.getStatus() != SeatStatus.AVAILABLE) {
-
                 throw new BookingConflictException(
                         "SEAT_UNAVAILABLE",
-                        "Seat is not available: "
-                                + seat.getSeatNumber()
+                        "One or more requested seats are not available"
                 );
             }
         }
 
-        int currentReservedSeats =
-                userLimit.getReservedSeats() == null
-                        ? 0
-                        : userLimit.getReservedSeats();
+        /*
+         * Per-user limit check while the user-limit row is locked.
+         */
+        int requestedSeatCount = seats.size();
 
-        int requestedSeatCount =
-                seats.size();
-
-        if (currentReservedSeats + requestedSeatCount
+        if (userLimit.getReservedSeats() + requestedSeatCount
                 > show.getPerUserLimit()) {
 
             throw new BookingConflictException(
                     "USER_LIMIT_EXCEEDED",
-                    "User cannot reserve more than "
-                            + show.getPerUserLimit()
-                            + " seats for this show"
+                    "User reservation limit exceeded"
             );
         }
 
         long amountPaise =
-                show.getPricePaise()
-                        * (long) requestedSeatCount;
+                show.getPricePaise() * requestedSeatCount;
+
+        Reservation reservation = new Reservation();
+
+        reservation.setShowId(showId);
+        reservation.setUserId(userId);
+        reservation.setAmountPaise(amountPaise);
+        reservation.setStatus(ReservationStatus.CONFIRMED.name());
+        reservation.setIdempotencyKey(request.getIdempotencyKey());
+        reservation.setRequestHash(requestHash);
+
+        reservation = reservationRepository.save(reservation);
 
         /*
-         * Create reservation.
+         * Confirm every seat and associate it with this reservation.
          */
-        Reservation reservation =
-                new Reservation(
-                        showId,
-                        userId,
-                        amountPaise,
-                        ReservationStatus.CONFIRMED.name(),
-                        idempotencyKey,
-                        requestHash
-                );
-
-        Reservation savedReservation =
-                reservationRepository.save(reservation);
-
-        /*
-         * Confirm every requested seat.
-         */
-        List<ReservationSeat> reservationSeats =
-                new ArrayList<>();
-
         for (Seat seat : seats) {
 
-            seat.setStatus(
-                    SeatStatus.CONFIRMED
-            );
+            seat.setStatus(SeatStatus.CONFIRMED);
+            seat.setReservationId(reservation.getId());
 
-            seat.setReservationId(
-                    savedReservation.getId()
-            );
+            seatRepository.save(seat);
 
-            reservationSeats.add(
-                    new ReservationSeat(
-                            new ReservationSeatId(
-                                    savedReservation.getId(),
-                                    seat.getId()
-                            )
+            ReservationSeat reservationSeat = new ReservationSeat();
+
+            reservationSeat.setId(
+                    new com.example.seat_reservation.entity.ReservationSeatId(
+                            reservation.getId(),
+                            seat.getId()
                     )
             );
+
+            reservationSeatRepository.save(reservationSeat);
         }
-
-        seatRepository.saveAll(seats);
-
-        reservationSeatRepository.saveAll(
-                reservationSeats
-        );
 
         /*
-         * Update the user's reserved-seat count.
+         * Increase the user's reserved-seat count.
          */
         userLimit.setReservedSeats(
-                currentReservedSeats
-                        + requestedSeatCount
+                userLimit.getReservedSeats() + requestedSeatCount
         );
 
-        showUserLimitRepository.save(
-                userLimit
-        );
+        showUserLimitRepository.save(userLimit);
 
-        log.info(
-                "Reservation confirmed: reservationId={}, showId={}, userId={}, seats={}, amountPaise={}",
-                savedReservation.getId(),
-                showId,
-                userId,
-                requestedSeats,
-                amountPaise
-        );
-
-        return buildResponse(
-                savedReservation,
-                requestedSeats
-        );
+        return buildResponse(reservation);
     }
 
-    private void validateIdempotencyRequest(
-            Reservation existing,
-            String requestHash
+    @Transactional
+    public ReservationResponse cancel(
+            UUID reservationId,
+            String userId
     ) {
 
-        if (!existing.getRequestHash().equals(requestHash)) {
+        /*
+         * Step 1:
+         * Lock the reservation row.
+         *
+         * This ensures only one cancellation/operation can
+         * modify this reservation at a time.
+         */
+
+        Reservation reservation =
+                reservationRepository.findById(reservationId)
+                        .orElseThrow(() ->
+                                new BookingConflictException(
+                                        "RESERVATION_NOT_FOUND",
+                                        "Reservation not found"
+                                )
+                        );
+
+        /*
+         * Step 2:
+         * Verify ownership.
+         *
+         * The user identity comes from the Authorization token,
+         * not from the request body.
+         */
+        if (!reservation.getUserId().equals(userId)) {
+            throw new BookingConflictException(
+                    "RESERVATION_NOT_OWNER",
+                    "Only the reservation owner can cancel it"
+            );
+        }
+
+        /*
+         * Cancellation is only allowed for a confirmed reservation.
+         */
+        if (!ReservationStatus.CONFIRMED.name()
+                .equals(reservation.getStatus())) {
 
             throw new BookingConflictException(
-                    "IDEMPOTENCY_KEY_REUSED",
-                    "Idempotency key was already used with a different request"
-            );
-        }
-    }
-
-    private List<String> normalizeAndValidateSeats(
-            List<String> seats
-    ) {
-
-        if (seats == null || seats.isEmpty()) {
-
-            throw new IllegalArgumentException(
-                    "At least one seat is required"
+                    "RESERVATION_NOT_ACTIVE",
+                    "Reservation is already cancelled"
             );
         }
 
-        List<String> normalizedSeats =
-                seats.stream()
-                        .map(String::trim)
-                        .toList();
+        UUID showId = reservation.getShowId();
 
-        Set<String> uniqueSeats =
-                new HashSet<>(normalizedSeats);
+        /*
+         * Step 3:
+         * Lock the user's reservation-limit row.
+         *
+         * This uses the same lock ordering as reservation creation:
+         *
+         *     user limit -> seats
+         *
+         * This is important for avoiding lock-order deadlocks.
+         */
+        showUserLimitRepository.insertIfAbsent(showId, userId);
 
-        if (uniqueSeats.size()
-                != normalizedSeats.size()) {
+        ShowUserLimit userLimit =
+                showUserLimitRepository.findByShowIdAndUserId(
+                        showId,
+                        userId
+                ).orElseThrow(() ->
+                        new IllegalStateException(
+                                "User reservation limit row not found"
+                        )
+                );
 
+        /*
+         * Step 4:
+         * Find all seats belonging to this reservation.
+         */
+        List<ReservationSeat> reservationSeats =
+                reservationSeatRepository
+                        .findByIdReservationId(reservationId);
+
+        if (reservationSeats.isEmpty()) {
             throw new BookingConflictException(
-                    "DUPLICATE_SEAT",
-                    "Duplicate seat requested"
+                    "RESERVATION_SEATS_NOT_FOUND",
+                    "No seats found for reservation"
             );
         }
 
-        return normalizedSeats.stream()
-                .sorted(Comparator.naturalOrder())
+        List<UUID> seatIds = reservationSeats.stream()
+                .map(rs -> rs.getId().getSeatId())
                 .toList();
+
+        /*
+         * Step 5:
+         * Lock all affected seats in deterministic order.
+         */
+        List<Seat> seats =
+                seatRepository.findByIdInOrderBySeatNumber(seatIds);
+
+        if (seats.size() != seatIds.size()) {
+            throw new BookingConflictException(
+                    "SEAT_NOT_FOUND",
+                    "One or more reservation seats could not be found"
+            );
+        }
+
+        /*
+         * Verify that every seat still belongs to this reservation.
+         *
+         * This prevents accidentally releasing a seat that has
+         * already been changed by another operation.
+         */
+        for (Seat seat : seats) {
+
+            if (!reservationId.equals(seat.getReservationId())
+                    || seat.getStatus() != SeatStatus.CONFIRMED) {
+
+                throw new BookingConflictException(
+                        "SEAT_STATE_CONFLICT",
+                        "Reservation seats are no longer in the expected state"
+                );
+            }
+        }
+
+        /*
+         * Step 6:
+         * Release the seats.
+         */
+        for (Seat seat : seats) {
+
+            seat.setStatus(SeatStatus.AVAILABLE);
+            seat.setReservationId(null);
+
+            seatRepository.save(seat);
+        }
+
+        /*
+         * Step 7:
+         * Mark reservation as cancelled.
+         */
+        reservation.setStatus(ReservationStatus.CANCELLED.name());
+
+        reservationRepository.save(reservation);
+
+        /*
+         * Step 8:
+         * Decrease the user's reserved-seat count.
+         */
+        int cancelledSeatCount = seats.size();
+
+        int newReservedSeatCount =
+                userLimit.getReservedSeats() - cancelledSeatCount;
+
+        /*
+         * Defensive protection against an inconsistent counter.
+         */
+        if (newReservedSeatCount < 0) {
+            newReservedSeatCount = 0;
+        }
+
+        userLimit.setReservedSeats(newReservedSeatCount);
+
+        showUserLimitRepository.save(userLimit);
+
+        return buildResponse(reservation);
     }
 
-    private String calculateRequestHash(
-            List<String> seats
-    ) {
+    private List<String> normalizeSeatNumbers(List<String> seats) {
 
-        String canonicalRequest =
-                String.join(",", seats);
+        List<String> normalized = new ArrayList<>(seats);
+
+        normalized.replaceAll(String::trim);
+
+        Collections.sort(normalized);
+
+        /*
+         * Duplicate seats in the same request are rejected.
+         */
+        for (int i = 1; i < normalized.size(); i++) {
+            if (normalized.get(i).equals(normalized.get(i - 1))) {
+                throw new BookingConflictException(
+                        "DUPLICATE_SEAT",
+                        "The same seat was requested more than once"
+                );
+            }
+        }
+
+        return normalized;
+    }
+
+    private String calculateRequestHash(List<String> seats) {
+
+        String normalizedRequest = String.join(",", seats);
 
         try {
-
             MessageDigest digest =
                     MessageDigest.getInstance("SHA-256");
 
             byte[] hash =
                     digest.digest(
-                            canonicalRequest.getBytes(
-                                    StandardCharsets.UTF_8
-                            )
+                            normalizedRequest.getBytes(StandardCharsets.UTF_8)
                     );
 
-            StringBuilder result =
-                    new StringBuilder();
+            StringBuilder hex = new StringBuilder();
 
             for (byte b : hash) {
-
-                result.append(
-                        String.format(
-                                "%02x",
-                                b
-                        )
-                );
+                hex.append(String.format("%02x", b));
             }
 
-            return result.toString();
+            return hex.toString();
 
         } catch (NoSuchAlgorithmException e) {
-
             throw new IllegalStateException(
-                    "SHA-256 algorithm is not available",
+                    "SHA-256 algorithm not available",
                     e
             );
         }
     }
 
     private ReservationResponse buildResponse(
-            Reservation reservation,
-            List<String> seats
+            Reservation reservation
     ) {
 
-        return new ReservationResponse(
-                reservation.getId(),
-                reservation.getShowId(),
-                reservation.getUserId(),
-                seats,
-                reservation.getAmountPaise(),
+        List<String> seatNumbers =
+                reservationSeatRepository
+                        .findByIdReservationId(reservation.getId())
+                        .stream()
+                        .map(rs -> seatRepository.findById(
+                                rs.getId().getSeatId()
+                        ).orElseThrow().getSeatNumber())
+                        .sorted()
+                        .toList();
+
+        ReservationResponse response = new ReservationResponse();
+
+        response.setReservationId(reservation.getId());
+        response.setShowId(reservation.getShowId());
+        response.setUserId(reservation.getUserId());
+        response.setSeats(seatNumbers);
+        response.setAmountPaise(reservation.getAmountPaise());
+        response.setStatus(
                 reservation.getStatus().toLowerCase()
         );
+
+        return response;
     }
 }

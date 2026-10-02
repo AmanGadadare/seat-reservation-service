@@ -14,8 +14,8 @@ import java.util.UUID;
 @Component
 public class UserIdentityFilter extends OncePerRequestFilter {
 
-    public static final String USER_ID_ATTRIBUTE = "USER_ID";
-    public static final String ROLE_ATTRIBUTE = "ROLE";
+    public static final String USER_ID_ATTRIBUTE = "userId";
+    public static final String ROLE_ATTRIBUTE = "role";
 
     private static final String ADMIN_ROLE = "ADMIN";
     private static final String USER_ROLE = "USER";

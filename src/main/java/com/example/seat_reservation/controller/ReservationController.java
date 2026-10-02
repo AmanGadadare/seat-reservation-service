@@ -2,39 +2,37 @@ package com.example.seat_reservation.controller;
 
 import com.example.seat_reservation.dto.ReservationResponse;
 import com.example.seat_reservation.dto.ReserveRequest;
-import com.example.seat_reservation.security.UserIdentityFilter;
 import com.example.seat_reservation.service.ReservationService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.UUID;
 
 @RestController
-@RequestMapping("/shows")
 public class ReservationController {
 
     private final ReservationService reservationService;
 
-    public ReservationController(ReservationService reservationService) {
+    public ReservationController(
+            ReservationService reservationService
+    ) {
         this.reservationService = reservationService;
     }
 
-    @PostMapping("/{showId}/reserve")
+    @PostMapping("/shows/{showId}/reserve")
     public ResponseEntity<ReservationResponse> reserve(
             @PathVariable UUID showId,
             @Valid @RequestBody ReserveRequest request,
             HttpServletRequest httpRequest
     ) {
 
-        String userId = (String) httpRequest.getAttribute(
-                UserIdentityFilter.USER_ID_ATTRIBUTE
-        );
+        String userId =
+                (String) httpRequest.getAttribute("userId");
 
         if (userId == null || userId.isBlank()) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+            return ResponseEntity.status(401).build();
         }
 
         ReservationResponse response =
@@ -45,7 +43,29 @@ public class ReservationController {
                 );
 
         return ResponseEntity
-                .status(HttpStatus.CREATED)
+                .status(201)
                 .body(response);
+    }
+
+    @PostMapping("/reservations/{reservationId}/cancel")
+    public ResponseEntity<ReservationResponse> cancel(
+            @PathVariable UUID reservationId,
+            HttpServletRequest httpRequest
+    ) {
+
+        String userId =
+                (String) httpRequest.getAttribute("userId");
+
+        if (userId == null || userId.isBlank()) {
+            return ResponseEntity.status(401).build();
+        }
+
+        ReservationResponse response =
+                reservationService.cancel(
+                        reservationId,
+                        userId
+                );
+
+        return ResponseEntity.ok(response);
     }
 }
